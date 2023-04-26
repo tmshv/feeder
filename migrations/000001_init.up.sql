@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS feeds (
+  id TEXT NOT NULL PRIMARY KEY,
+  slug TEXT UNIQUE,
+  url TEXT,
+  updated_at DATETIME NOT NULL,
+  created_at DATETIME NOT NULL,
+  refresh_ms INTEGER DEFAULT 60000
+);
