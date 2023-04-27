@@ -5,7 +5,11 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gilliek/go-opml/opml"
@@ -56,55 +60,82 @@ func setupDb(migrationsPath string, db *sql.DB) error {
 	return nil
 }
 
-func runFeed(db *sql.DB, feedr *Feed) error {
+func fetchFeedRecords(fp *gofeed.Parser, feed *Feed) ([]Record, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	fp := gofeed.NewParser()
-	feed, _ := fp.ParseURLWithContext(feedr.Url, ctx)
-	fmt.Println(feed.Title)
-	fmt.Println(feed.Description)
 
-	r := readability.New()
+	f, err := fp.ParseURLWithContext(feed.Url, ctx)
+	if err != nil {
+		return nil, err
+	}
 
-	for _, item := range feed.Items {
+	result := make([]Record, 0)
+	for _, item := range f.Items {
 		var rec Record
 		rec.ID = uuid.NewString()
-		rec.FeedID = feedr.ID
+		rec.FeedID = feed.ID
 		rec.Title = item.Title
 		rec.Description = item.Description
 		rec.Content = item.Content
 		rec.PublishedAt = *item.PublishedParsed
 		rec.Link = item.Link
 
-		err := addRecord(db, rec)
-		if err != nil {
-			log.Fatalf("Failed add record %s", item.Link)
-		}
-		fmt.Printf("Got Record %v\n\n", rec)
-
-		// fmt.Printf("Title: %s\n", item.Title)
-		// fmt.Printf("Date: %s\n", item.PublishedParsed)
-		// fmt.Printf("Link: %s\n", item.Link)
-
-		res, err := http.Get(item.Link)
-		if err != nil {
-			log.Printf("Failed to get content of %s", item.Link)
-			continue
-		}
-		if res.StatusCode != 200 {
-			log.Printf("Got not OK for %s", item.Link)
-			continue
-		}
-
-		a, err := r.Parse(res.Body, item.Link)
-		if err != nil {
-			panic(err)
-		}
-
-		fmt.Printf("Parserd content has %d len\n\n", len(a.Content))
+		result = append(result, rec)
 	}
+	return result, nil
+}
+func runFeed(db *sql.DB, feed *Feed, news chan Record) {
+	parser := gofeed.NewParser()
+	for {
+		records, err := fetchFeedRecords(parser, feed)
+		if err != nil {
+			log.Printf("Failed for fetch feed %s", feed.Url)
+		}
 
-	return nil
+		for _, rec := range records {
+			added, err := addRecord(db, rec)
+			if err != nil {
+				log.Printf("Failed add record %s", rec.Link)
+				continue
+			}
+			if added > 0 {
+				log.Printf("Record! %s", rec.Link)
+				news <- rec
+			}
+		}
+
+        log.Printf("Feed %s go to sleep %d", feed.Slug, feed.RefreshMs)
+		time.Sleep(time.Duration(feed.RefreshMs) * time.Millisecond)
+	}
+}
+
+func handleRecords(db *sql.DB, news chan Record) error {
+	r := readability.New()
+	log.Println("Wait for news to readability")
+
+	for {
+		if rec, ok := <-news; ok {
+			res, err := http.Get(rec.Link)
+			if err != nil {
+				log.Printf("Failed to get content of %s", rec.Link)
+				continue
+			}
+			if res.StatusCode != 200 {
+				log.Printf("Got not OK for %s", rec.Link)
+				continue
+			}
+
+			a, err := r.Parse(res.Body, rec.Link)
+			if err != nil {
+				return err
+			}
+
+			fmt.Printf("Content of Record %s has len of %d\n", rec.Link, len(a.Content))
+		} else {
+			fmt.Println("Chan closed")
+			return nil
+		}
+	}
 }
 
 func addFeed(db *sql.DB, slug string, url string) error {
@@ -124,7 +155,7 @@ func addFeed(db *sql.DB, slug string, url string) error {
 
 func findFeedByUrl(db *sql.DB, feedUrl string) (Feed, error) {
 	var feed Feed
-	row := db.QueryRow("SELECT id, slug, url, created_at, updated_at, refresh_ms feed FROM feeds WHERE url = ? LIMIT 1;", feedUrl)
+	row := db.QueryRow("SELECT id, slug, url, created_at, updated_at, refresh_ms FROM feeds WHERE url = ? LIMIT 1;", feedUrl)
 	err := row.Scan(
 		&feed.ID,
 		&feed.Slug,
@@ -139,17 +170,50 @@ func findFeedByUrl(db *sql.DB, feedUrl string) (Feed, error) {
 	return feed, nil
 }
 
-func addRecord(db *sql.DB, item Record) error {
-	stmt, err := db.Prepare("INSERT OR IGNORE INTO records(id, feed_id, title, description, content, published_at, link) VALUES(?, ?, ?, ?, ?, ?, ?)")
+func getFeeds(db *sql.DB) ([]Feed, error) {
+	result := make([]Feed, 0)
+
+	rows, err := db.Query("SELECT id, slug, url, created_at, updated_at, refresh_ms FROM feeds;")
 	if err != nil {
-		return err
+		return []Feed{}, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		feed := Feed{}
+		err := rows.Scan(
+			&feed.ID,
+			&feed.Slug,
+			&feed.Url,
+			&feed.CreatedAt,
+			&feed.UpdatedAt,
+			&feed.RefreshMs,
+		)
+		if err != nil {
+			log.Println("Failed to get row")
+			continue
+		}
+
+		// TODO do someting with it
+		feed.RefreshMs += int64(rand.Intn(5000))
+
+		result = append(result, feed)
 	}
 
-	_, err = stmt.Exec(item.ID, item.FeedID, item.Title, item.Description, item.Content, item.PublishedAt, item.Link)
+	return result, nil
+}
+
+func addRecord(db *sql.DB, item Record) (int64, error) {
+	stmt, err := db.Prepare("INSERT OR IGNORE INTO records(id, feed_id, title, description, content, published_at, link) VALUES(?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return nil
+
+	res, err := stmt.Exec(item.ID, item.FeedID, item.Title, item.Description, item.Content, item.PublishedAt, item.Link)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func createJsonFeed() {
@@ -203,28 +267,15 @@ func importOpml(db *sql.DB, filePath string) error {
 				continue
 			}
 
-			// fmt.Println(item.Title)
-			// fmt.Println(item.XMLURL)
-			// fmt.Println("")
-
 			feed, err := findFeedByUrl(db, item.XMLURL)
 			if err != nil {
-                slug := slugify(item.Title)
-
+				slug := slugify(item.Title)
 				log.Printf("Add %s", item.XMLURL)
 				err = addFeed(db, slug, item.XMLURL)
 				continue
 			}
 
 			log.Printf("Skip imporing %s", feed.Slug)
-
-			// var feedUrl string
-			// err = db.QueryRow("SELECT url FROM feeds LIMIT 1;").Scan(&feedUrl)
-			// if err != nil {
-			// 	log.Fatal(err)
-			// }
-			// fmt.Println(feedUrl)
-			//
 		}
 	}
 
@@ -237,6 +288,8 @@ func main() {
 	// load each items raw html
 	// put to items table
 	// put read mode content to table
+
+	rand.Seed(time.Now().UnixNano())
 
 	DATABASE_URI := "feed.db"
 
@@ -255,19 +308,32 @@ func main() {
 	// err = importOpml(db, "20230426-reeder.opml")
 	// err = addFeed(db, "hacker-news", feedUrl)
 
-	var feedUrl string
-	err = db.QueryRow("SELECT url FROM feeds LIMIT 1;").Scan(&feedUrl)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println(feedUrl)
-
-	feed, err := findFeedByUrl(db, feedUrl)
+	feeds, err := getFeeds(db)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-    runFeed(db, &feed)
+	log.Printf("Found %d feeds", len(feeds))
+
+	// Create a channel to communicate with the goroutine.
+	done := make(chan bool)
+	news := make(chan Record)
+
+	go handleRecords(db, news)
+	for _, feed := range feeds {
+        log.Printf("Run feed %s", feed.Slug)
+		go runFeed(db, &feed, news)
+	}
+
+	// Wait for an interrupt signal (SIGINT or SIGTERM).
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	<-sigChan
+
+	// Close the channel to signal the goroutine to exit.
+	fmt.Println("closing channel...")
+	close(news)
+	close(done)
 }
 
 // func initPragmas(db *dbx.DB) error {
