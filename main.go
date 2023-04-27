@@ -18,6 +18,25 @@ import (
 	"github.com/mmcdole/gofeed"
 )
 
+type Feed struct {
+	ID        string    `json:"id" db:"id"`
+	Slug      string    `json:"slug" db:"slug"`
+	Url       string    `json:"url" db:"url"`
+	CreatedAt time.Time `json:"createdAt" db:"created_at"`
+	UpdatedAt time.Time `json:"updatedAt" db:"updated_at"`
+	RefreshMs int64     `json:"refreshMs" db:"refresh_ms"`
+}
+
+type Record struct {
+	ID          string    `json:"id" db:"id"`
+	FeedID      string    `json:"feed_id" db:"feed_id"`
+	Title       string    `json:"title" db:"title"`
+	Description string    `json:"description" db:"description"`
+	Content     string    `json:"content" db:"content"`
+	PublishedAt time.Time `json:"published_at" db:"published_at"`
+	Link        string    `json:"link" db:"link"`
+}
+
 func setupDb(migrationsPath string, db *sql.DB) error {
 	driver, err := sqlite3.WithInstance(db, &sqlite3.Config{
 		MigrationsTable: "migrations",
@@ -35,27 +54,44 @@ func setupDb(migrationsPath string, db *sql.DB) error {
 	return nil
 }
 
-func runFeed(feedUrl string) error {
+func runFeed(db *sql.DB, feedr *Feed) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	fp := gofeed.NewParser()
-	feed, _ := fp.ParseURLWithContext(feedUrl, ctx)
+	feed, _ := fp.ParseURLWithContext(feedr.Url, ctx)
 	fmt.Println(feed.Title)
 	fmt.Println(feed.Description)
 
 	r := readability.New()
 
 	for _, item := range feed.Items {
-		fmt.Printf("Title: %s\n", item.Title)
-		fmt.Printf("Date: %s\n", item.PublishedParsed)
-		fmt.Printf("Link: %s\n", item.Link)
+		var rec Record
+		rec.ID = uuid.NewString()
+		rec.FeedID = feedr.ID
+		rec.Title = item.Title
+		rec.Description = item.Description
+		rec.Content = item.Content
+		rec.PublishedAt = *item.PublishedParsed
+		rec.Link = item.Link
+
+        err := addRecord(db, rec)
+        if err != nil {
+            log.Fatalf("Failed add record %s", item.Link)
+        }
+		fmt.Printf("Got Record %v\n\n", rec)
+
+		// fmt.Printf("Title: %s\n", item.Title)
+		// fmt.Printf("Date: %s\n", item.PublishedParsed)
+		// fmt.Printf("Link: %s\n", item.Link)
 
 		res, err := http.Get(item.Link)
 		if err != nil {
-			panic(err)
+            log.Printf("Failed to get content of %s", item.Link)
+            continue
 		}
 		if res.StatusCode != 200 {
-			panic("Not OK")
+            log.Printf("Got not OK for %s", item.Link)
+            continue
 		}
 
 		a, err := r.Parse(res.Body, item.Link)
@@ -82,6 +118,49 @@ func addFeed(db *sql.DB, slug string, url string) error {
 		return err
 	}
 	return nil
+}
+
+func findFeedByUrl(db *sql.DB, feedUrl string) (Feed, error) {
+	var feed Feed
+	row := db.QueryRow("SELECT id, slug, url, created_at, updated_at, refresh_ms feed FROM feeds WHERE url = ? LIMIT 1;", feedUrl)
+	err := row.Scan(
+		&feed.ID,
+		&feed.Slug,
+		&feed.Url,
+		&feed.CreatedAt,
+		&feed.UpdatedAt,
+		&feed.RefreshMs,
+	)
+	if err != nil {
+		return Feed{}, err
+	}
+	return feed, nil
+}
+
+func addRecord(db *sql.DB, item Record) error {
+	stmt, err := db.Prepare("INSERT OR IGNORE INTO records(id, feed_id, title, description, content, published_at, link) VALUES(?, ?, ?, ?, ?, ?, ?)")
+	if err != nil {
+		return err
+	}
+
+	_, err = stmt.Exec(item.ID, item.FeedID, item.Title, item.Description, item.Content, item.PublishedAt, item.Link)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func createJsonFeed() {
+	// Select record
+	// var selectedRecord Record
+	// row := db.QueryRow("SELECT id, feed_id, title, description, content, published_at, link FROM records WHERE id = ?", "123")
+	// err = row.Scan(&selectedRecord.ID, &selectedRecord.FeedID, &selectedRecord.Title, &selectedRecord.Description, &selectedRecord.Content, &selectedRecord.PublishedAt, &selectedRecord.Link)
+	//
+	//	if err != nil {
+	//	    panic(err)
+	//	}
+	//
+	// fmt.Println(selectedRecord)
 }
 
 func main() {
@@ -114,7 +193,12 @@ func main() {
 	}
 	fmt.Println(feedUrl)
 
-	runFeed(feedUrl)
+	feed, err := findFeedByUrl(db, feedUrl)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+    runFeed(db, &feed)
 }
 
 // func initPragmas(db *dbx.DB) error {
