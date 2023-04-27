@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/gilliek/go-opml/opml"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/sqlite3"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -15,6 +16,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/cixtor/readability"
+	"github.com/gosimple/slug"
 	"github.com/mmcdole/gofeed"
 )
 
@@ -74,10 +76,10 @@ func runFeed(db *sql.DB, feedr *Feed) error {
 		rec.PublishedAt = *item.PublishedParsed
 		rec.Link = item.Link
 
-        err := addRecord(db, rec)
-        if err != nil {
-            log.Fatalf("Failed add record %s", item.Link)
-        }
+		err := addRecord(db, rec)
+		if err != nil {
+			log.Fatalf("Failed add record %s", item.Link)
+		}
 		fmt.Printf("Got Record %v\n\n", rec)
 
 		// fmt.Printf("Title: %s\n", item.Title)
@@ -86,12 +88,12 @@ func runFeed(db *sql.DB, feedr *Feed) error {
 
 		res, err := http.Get(item.Link)
 		if err != nil {
-            log.Printf("Failed to get content of %s", item.Link)
-            continue
+			log.Printf("Failed to get content of %s", item.Link)
+			continue
 		}
 		if res.StatusCode != 200 {
-            log.Printf("Got not OK for %s", item.Link)
-            continue
+			log.Printf("Got not OK for %s", item.Link)
+			continue
 		}
 
 		a, err := r.Parse(res.Body, item.Link)
@@ -163,6 +165,72 @@ func createJsonFeed() {
 	// fmt.Println(selectedRecord)
 }
 
+func slugify(value string) string {
+	// text := slug.Make("Hellö Wörld хелло ворлд")
+	// fmt.Println(text) // Will print: "hello-world-khello-vorld"
+	//
+	// someText := slug.Make("影師")
+	// fmt.Println(someText) // Will print: "ying-shi"
+	//
+	// enText := slug.MakeLang("This & that", "en")
+	// fmt.Println(enText) // Will print: "this-and-that"
+	//
+	// deText := slug.MakeLang("Diese & Dass", "de")
+	// fmt.Println(deText) // Will print: "diese-und-dass"
+	//
+	// slug.Lowercase = false // Keep uppercase characters
+	// deUppercaseText := slug.MakeLang("Diese & Dass", "de")
+	// fmt.Println(deUppercaseText) // Will print: "Diese-und-Dass"
+	//
+	// slug.CustomSub = map[string]string{
+	// 	"water": "sand",
+	// }
+	// textSub := slug.Make("water is hot")
+	// fmt.Println(textSub) // Will print: "sand-is-hot"
+
+	return slug.MakeLang(value, "en")
+}
+
+func importOpml(db *sql.DB, filePath string) error {
+	doc, err := opml.NewOPMLFromFile(filePath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, o := range doc.Outlines() {
+		for _, item := range o.Outlines {
+			if item.XMLURL == "" {
+				continue
+			}
+
+			// fmt.Println(item.Title)
+			// fmt.Println(item.XMLURL)
+			// fmt.Println("")
+
+			feed, err := findFeedByUrl(db, item.XMLURL)
+			if err != nil {
+                slug := slugify(item.Title)
+
+				log.Printf("Add %s", item.XMLURL)
+				err = addFeed(db, slug, item.XMLURL)
+				continue
+			}
+
+			log.Printf("Skip imporing %s", feed.Slug)
+
+			// var feedUrl string
+			// err = db.QueryRow("SELECT url FROM feeds LIMIT 1;").Scan(&feedUrl)
+			// if err != nil {
+			// 	log.Fatal(err)
+			// }
+			// fmt.Println(feedUrl)
+			//
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	// take rss
 	// load items
@@ -184,6 +252,7 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// err = importOpml(db, "20230426-reeder.opml")
 	// err = addFeed(db, "hacker-news", feedUrl)
 
 	var feedUrl string
