@@ -195,7 +195,7 @@ func getFeeds(db *sql.DB) ([]Feed, error) {
 		}
 
 		// TODO do someting with it
-		feed.RefreshMs += int64(rand.Intn(5000))
+		feed.RefreshMs += int64(rand.Intn(10000))
 
 		result = append(result, feed)
 	}
