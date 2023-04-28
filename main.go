@@ -60,11 +60,11 @@ func setupDb(migrationsPath string, db *sql.DB) error {
 	return nil
 }
 
-func fetchFeedRecords(fp *gofeed.Parser, feed *Feed) ([]Record, error) {
+func fetchFeedRecords(parser *gofeed.Parser, feed *Feed) ([]Record, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	f, err := fp.ParseURLWithContext(feed.Url, ctx)
+	f, err := parser.ParseURLWithContext(feed.Url, ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -84,6 +84,7 @@ func fetchFeedRecords(fp *gofeed.Parser, feed *Feed) ([]Record, error) {
 	}
 	return result, nil
 }
+
 func runFeed(db *sql.DB, feed *Feed, news chan Record) {
 	parser := gofeed.NewParser()
 	for {
