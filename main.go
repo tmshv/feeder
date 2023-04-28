@@ -284,12 +284,6 @@ func importOpml(db *sql.DB, filePath string) error {
 }
 
 func main() {
-	// take rss
-	// load items
-	// load each items raw html
-	// put to items table
-	// put read mode content to table
-
 	rand.Seed(time.Now().UnixNano())
 
 	DATABASE_URI := "feed.db"
