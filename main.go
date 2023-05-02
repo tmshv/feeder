@@ -464,7 +464,7 @@ func main() {
 	done := make(chan bool)
 	news := make(chan string, 10000)
 
-	for i := 1; i < 3; i++ {
+	for i := 0; i < 3; i++ {
 		go handleRecords(db, news)
 	}
 	go handleOldRecords(db, news)
