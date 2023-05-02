@@ -26,6 +26,8 @@ import (
 	"github.com/cixtor/readability"
 	"github.com/gosimple/slug"
 	"github.com/mmcdole/gofeed"
+
+	md "github.com/JohannesKaufmann/html-to-markdown"
 )
 
 type Feed struct {
@@ -201,7 +203,12 @@ func handlePage(db *sql.DB, url string) error {
 		return err
 	}
 
-	err = addPage(db, url, htmlStr, a.Content)
+	md, err := htmlToMd(a.Content)
+	if err != nil {
+		log.Printf("Cannot create markdown of %s, %v", url, err)
+	}
+
+	err = addPage(db, url, htmlStr, md)
 	if err != nil {
 		log.Printf("Failed to add Page %s", url)
 		return err
@@ -259,6 +266,31 @@ func addPage(db *sql.DB, url string, html string, content string) error {
 	if err != nil {
 		return err
 	}
+	return nil
+}
+
+func updatePageContent(db *sql.DB, page *Page, content string) error {
+	stmt, err := db.Prepare(`
+        UPDATE pages
+        SET content = ?
+        WHERE url = ? AND created_at = ?
+    `)
+	if err != nil {
+		return err
+	}
+    res, err := stmt.Exec(content, page.Url, page.CreatedAt)
+	if err != nil {
+		return err
+	}
+
+    x, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+    if x == 0 {
+        log.Printf("Content of Page %s is not updated", page.Url)
+    }
+
 	return nil
 }
 
@@ -367,6 +399,40 @@ func findRecordsWithNoPage(db *sql.DB) ([]string, error) {
 	return result, nil
 }
 
+func getAllPages(db *sql.DB) ([]Page, error) {
+	result := make([]Page, 0)
+	rows, err := db.Query(`
+        SELECT
+            url,
+            html,
+            content,
+            created_at
+        FROM pages
+        ;
+    `)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var page Page
+		err := rows.Scan(
+			&page.Url,
+			&page.Html,
+			&page.Content,
+			&page.CreatedAt,
+		)
+		if err != nil {
+			log.Printf("Failed to get row: %v", err)
+			continue
+		}
+		result = append(result, page)
+	}
+
+	return result, nil
+}
+
 func createJsonFeed() {
 	// Select record
 	// var selectedRecord Record
@@ -433,6 +499,40 @@ func importOpml(db *sql.DB, filePath string) error {
 	return nil
 }
 
+func htmlToMd(html string) (string, error) {
+	converter := md.NewConverter("", true, nil)
+	return converter.ConvertString(html)
+}
+
+func allToMd(db *sql.DB) {
+	r := readability.New()
+	pages, err := getAllPages(db)
+	if err != nil {
+		log.Printf("Failed to all to md: %v", err)
+	}
+
+	for _, page := range pages {
+        html := strings.NewReader(page.Html)
+		a, err := r.Parse(html, page.Url)
+		if err != nil {
+			log.Printf("Readability failed to parse %s: %v", page.Url, err)
+            continue
+		}
+
+        md, err := htmlToMd(a.Content)
+        if err != nil {
+			log.Printf("Markdown failed to convert from html %s: %v", page.Url, err)
+            continue
+        }
+
+        err = updatePageContent(db, &page, md)
+        if err != nil {
+			log.Printf("Failed to update content of page %s: %v", page.Url, err)
+            continue
+        }
+	}
+}
+
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
@@ -468,6 +568,7 @@ func main() {
 		go handleRecords(db, news)
 	}
 	go handleOldRecords(db, news)
+    // go allToMd(db)
 
 	for _, feed := range feeds {
 		go runFeed(db, feed, news)
