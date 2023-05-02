@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"math/rand"
 	"net/http"
@@ -45,6 +47,13 @@ type Record struct {
 	Link        string    `json:"link" db:"link"`
 }
 
+type Page struct {
+	Url       string    `json:"url" db:"url"`
+	Html      string    `json:"html" db:"html"`
+	Content   string    `json:"content" db:"content"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
+}
+
 func setupDb(migrationsPath string, db *sql.DB) error {
 	driver, err := sqlite3.WithInstance(db, &sqlite3.Config{
 		MigrationsTable: "migrations",
@@ -58,7 +67,16 @@ func setupDb(migrationsPath string, db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	m.Up()
+	err = m.Up()
+	if err != nil {
+		if err == migrate.ErrNoChange {
+			log.Print("Nothing to migrate")
+			return nil
+		}
+		return err
+	}
+
+	log.Print("Successfully migrated to the latest version")
 	return nil
 }
 
@@ -108,15 +126,15 @@ func fetchFeedRecords(feed *Feed) ([]Record, error) {
 	return result, nil
 }
 
-func runFeed(db *sql.DB, feed Feed, news chan Record) {
-    log.Printf("Run feed %s (%s)", feed.Slug, feed.Slug)
+func runFeed(db *sql.DB, feed Feed, news chan string) {
+	log.Printf("Run feed %s (%s)", feed.Slug, feed.Slug)
 	for {
 		records, err := fetchFeedRecords(&feed)
 		if err != nil {
 			log.Printf("Failed for fetch feed %s", feed.Url)
 		}
 
-        count := 0
+		count := 0
 		for _, rec := range records {
 			added, err := addRecord(db, rec)
 			if err != nil {
@@ -124,9 +142,8 @@ func runFeed(db *sql.DB, feed Feed, news chan Record) {
 				continue
 			}
 			if added > 0 {
-				// log.Printf("New Record! %s", rec.Link)
-                count += 1
-				news <- rec
+				count += 1
+				news <- rec.Link
 			}
 		}
 
@@ -135,37 +152,78 @@ func runFeed(db *sql.DB, feed Feed, news chan Record) {
 	}
 }
 
-func handleRecords(db *sql.DB, news chan Record) error {
-	r := readability.New()
+func handleRecords(db *sql.DB, news chan string) error {
 	log.Println("Wait for news to readability")
 
 	for {
-		if rec, ok := <-news; ok {
-			res, err := http.Get(rec.Link)
+		if url, ok := <-news; ok {
+            err := handlePage(db, url)
 			if err != nil {
-				log.Printf("Failed to get content of %s", rec.Link)
+				log.Printf("Failed to get content of %s", url)
 				continue
 			}
-			if res.StatusCode != 200 {
-				log.Printf("Got not OK for %s", rec.Link)
-				continue
-			}
-
-			a, err := r.Parse(res.Body, rec.Link)
-			if err != nil {
-				return err
-			}
-
-			fmt.Printf("Content of Record %s has len of %d\n", rec.Link, len(a.Content))
+            log.Printf("Added content of %s", url)
 		} else {
-			fmt.Println("Chan closed")
+			log.Println("Chan closed")
 			return nil
 		}
 	}
 }
 
-func addFeed(db *sql.DB, slug string, url string) error {
-	stmt, err := db.Prepare("INSERT INTO feeds(id, slug, url, created_at, updated_at) VALUES(?, ?, ?, ?, ?)")
+func handlePage(db *sql.DB, url string) error {
+	r := readability.New()
+	res, err := http.Get(url)
+	if err != nil {
+		log.Printf("Failed to get content of %s", url)
+		return err
+	}
+	if res.StatusCode != 200 {
+		log.Printf("Got not OK for %s", url)
+		return err
+	}
+
+	bodyBytes, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		log.Printf("Failed to read body bytes of %s: %v", url, err)
+		return err
+	}
+
+	bodyBuf := bytes.NewBuffer(bodyBytes)
+	a, err := r.Parse(bodyBuf, url)
+	if err != nil {
+		log.Printf("Failed to readability parse %s: %v", url, err)
+		return err
+	}
+
+	htmlStr := string(bodyBytes)
+	if err != nil {
+		log.Printf("%v", err)
+		return err
+	}
+
+	err = addPage(db, url, htmlStr, a.Content)
+	if err != nil {
+		log.Printf("Failed to add Page %s", url)
+		return err
+	}
+
+	return nil
+}
+
+func handleOldRecords(db *sql.DB, news chan string) error {
+	urls, err := findRecordsWithNoPage(db)
+	if err != nil {
+		log.Printf("Failed to find urls: %v", err)
+		return err
+	}
+
+	for _, url := range urls {
+        news <- url
+	}
+    return nil
+}
+
+func addFeed(db *sql.DB, slug string, url string) error { stmt, err := db.Prepare("INSERT INTO feeds(id, slug, url, created_at, updated_at) VALUES(?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
@@ -173,6 +231,20 @@ func addFeed(db *sql.DB, slug string, url string) error {
 	id := uuid.NewString()
 	now := time.Now()
 	_, err = stmt.Exec(id, slug, url, now, now)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func addPage(db *sql.DB, url string, html string, content string) error {
+	stmt, err := db.Prepare("INSERT INTO pages(url, created_at, html, content) VALUES(?, ?, ?, ?)")
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	_, err = stmt.Exec(url, now, html, content)
 	if err != nil {
 		return err
 	}
@@ -240,6 +312,32 @@ func addRecord(db *sql.DB, item Record) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+func findRecordsWithNoPage(db *sql.DB) ([]string, error) {
+	result := make([]string, 0)
+	rows, err := db.Query(`
+        SELECT records.link
+        FROM records
+        LEFT JOIN pages ON records.link = pages.url
+        WHERE pages.url IS NULL;
+    `)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var url string
+		err := rows.Scan(&url)
+		if err != nil {
+            log.Printf("Failed to get row: %v", err)
+			continue
+		}
+		result = append(result, url)
+	}
+
+	return result, nil
 }
 
 func createJsonFeed() {
@@ -337,11 +435,12 @@ func main() {
 
 	// Create a channel to communicate with the goroutine.
 	done := make(chan bool)
-	news := make(chan Record, 10000)
+	news := make(chan string, 10000)
 
-	for i := 1; i < 5; i++ {
+	for i := 1; i < 3; i++ {
 		go handleRecords(db, news)
 	}
+	go handleOldRecords(db, news)
 
 	for _, feed := range feeds {
 		go runFeed(db, feed, news)
