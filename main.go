@@ -157,12 +157,12 @@ func handleRecords(db *sql.DB, news chan string) error {
 
 	for {
 		if url, ok := <-news; ok {
-            err := handlePage(db, url)
+			err := handlePage(db, url)
 			if err != nil {
 				log.Printf("Failed to get content of %s", url)
 				continue
 			}
-            log.Printf("Added content of %s", url)
+			log.Printf("Added content of %s", url)
 		} else {
 			log.Println("Chan closed")
 			return nil
@@ -218,12 +218,18 @@ func handleOldRecords(db *sql.DB, news chan string) error {
 	}
 
 	for _, url := range urls {
-        news <- url
+		news <- url
 	}
-    return nil
+	return nil
 }
 
-func addFeed(db *sql.DB, slug string, url string) error { stmt, err := db.Prepare("INSERT INTO feeds(id, slug, url, created_at, updated_at) VALUES(?, ?, ?, ?, ?)")
+func addFeed(db *sql.DB, slug string, url string) error {
+	stmt, err := db.Prepare(`
+        INSERT INTO
+        feeds(id, slug, url, created_at, updated_at)
+        VALUES
+        (?, ?, ?, ?, ?)
+    `)
 	if err != nil {
 		return err
 	}
@@ -238,7 +244,12 @@ func addFeed(db *sql.DB, slug string, url string) error { stmt, err := db.Prepar
 }
 
 func addPage(db *sql.DB, url string, html string, content string) error {
-	stmt, err := db.Prepare("INSERT INTO pages(url, created_at, html, content) VALUES(?, ?, ?, ?)")
+	stmt, err := db.Prepare(`
+        INSERT INTO
+        pages(url, created_at, html, content)
+        VALUES
+        (?, ?, ?, ?)
+    `)
 	if err != nil {
 		return err
 	}
@@ -253,7 +264,13 @@ func addPage(db *sql.DB, url string, html string, content string) error {
 
 func findFeedByUrl(db *sql.DB, feedUrl string) (Feed, error) {
 	var feed Feed
-	row := db.QueryRow("SELECT id, slug, url, created_at, updated_at, refresh_ms FROM feeds WHERE url = ? LIMIT 1;", feedUrl)
+	row := db.QueryRow(`
+        SELECT id, slug, url, created_at, updated_at, refresh_ms
+        FROM feeds
+        WHERE url = ?
+        LIMIT 1
+        ;
+    `, feedUrl)
 	err := row.Scan(
 		&feed.ID,
 		&feed.Slug,
@@ -271,7 +288,12 @@ func findFeedByUrl(db *sql.DB, feedUrl string) (Feed, error) {
 func getFeeds(db *sql.DB) ([]Feed, error) {
 	result := make([]Feed, 0)
 
-	rows, err := db.Query("SELECT id, slug, url, created_at, updated_at, refresh_ms FROM feeds;")
+	rows, err := db.Query(`
+        SELECT
+        id, slug, url, created_at, updated_at, refresh_ms
+        FROM feeds
+        ;
+    `)
 	if err != nil {
 		return nil, err
 	}
@@ -302,7 +324,12 @@ func getFeeds(db *sql.DB) ([]Feed, error) {
 }
 
 func addRecord(db *sql.DB, item Record) (int64, error) {
-	stmt, err := db.Prepare("INSERT OR IGNORE INTO records(id, feed_id, title, description, content, published_at, link) VALUES(?, ?, ?, ?, ?, ?, ?)")
+	stmt, err := db.Prepare(`
+        INSERT OR IGNORE INTO
+        records(id, feed_id, title, description, content, published_at, link)
+        VALUES
+        (?, ?, ?, ?, ?, ?, ?)
+    `)
 	if err != nil {
 		return 0, err
 	}
@@ -331,7 +358,7 @@ func findRecordsWithNoPage(db *sql.DB) ([]string, error) {
 		var url string
 		err := rows.Scan(&url)
 		if err != nil {
-            log.Printf("Failed to get row: %v", err)
+			log.Printf("Failed to get row: %v", err)
 			continue
 		}
 		result = append(result, url)
