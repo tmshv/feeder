@@ -7,8 +7,10 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -60,7 +62,26 @@ func setupDb(migrationsPath string, db *sql.DB) error {
 	return nil
 }
 
-func fetchFeedRecords(parser *gofeed.Parser, feed *Feed) ([]Record, error) {
+func DropUtmMarkers(urlStr string) string {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return urlStr // return original URL in case of error
+	}
+
+	queryParams := u.Query()
+	for key := range queryParams {
+		if strings.HasPrefix(key, "utm_") {
+			delete(queryParams, key)
+		}
+	}
+
+	u.RawQuery = queryParams.Encode()
+
+	return u.String()
+}
+
+func fetchFeedRecords(feed *Feed) ([]Record, error) {
+	parser := gofeed.NewParser()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -68,6 +89,8 @@ func fetchFeedRecords(parser *gofeed.Parser, feed *Feed) ([]Record, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	log.Printf("Fetch %s", feed.Url)
 
 	result := make([]Record, 0)
 	for _, item := range f.Items {
@@ -78,21 +101,22 @@ func fetchFeedRecords(parser *gofeed.Parser, feed *Feed) ([]Record, error) {
 		rec.Description = item.Description
 		rec.Content = item.Content
 		rec.PublishedAt = *item.PublishedParsed
-		rec.Link = item.Link
+		rec.Link = DropUtmMarkers(item.Link)
 
 		result = append(result, rec)
 	}
 	return result, nil
 }
 
-func runFeed(db *sql.DB, feed *Feed, news chan Record) {
-	parser := gofeed.NewParser()
+func runFeed(db *sql.DB, feed Feed, news chan Record) {
+    log.Printf("Run feed %s (%s)", feed.Slug, feed.Slug)
 	for {
-		records, err := fetchFeedRecords(parser, feed)
+		records, err := fetchFeedRecords(&feed)
 		if err != nil {
 			log.Printf("Failed for fetch feed %s", feed.Url)
 		}
 
+        count := 0
 		for _, rec := range records {
 			added, err := addRecord(db, rec)
 			if err != nil {
@@ -100,12 +124,13 @@ func runFeed(db *sql.DB, feed *Feed, news chan Record) {
 				continue
 			}
 			if added > 0 {
-				log.Printf("Record! %s", rec.Link)
+				// log.Printf("New Record! %s", rec.Link)
+                count += 1
 				news <- rec
 			}
 		}
 
-        log.Printf("Feed %s go to sleep %d", feed.Slug, feed.RefreshMs)
+		log.Printf("Found %d new records (%d total) in feed %s. Falling to sleep %d ms", count, len(records), feed.Slug, feed.RefreshMs)
 		time.Sleep(time.Duration(feed.RefreshMs) * time.Millisecond)
 	}
 }
@@ -176,7 +201,7 @@ func getFeeds(db *sql.DB) ([]Feed, error) {
 
 	rows, err := db.Query("SELECT id, slug, url, created_at, updated_at, refresh_ms FROM feeds;")
 	if err != nil {
-		return []Feed{}, err
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -312,12 +337,14 @@ func main() {
 
 	// Create a channel to communicate with the goroutine.
 	done := make(chan bool)
-	news := make(chan Record)
+	news := make(chan Record, 10000)
 
-	go handleRecords(db, news)
+	for i := 1; i < 5; i++ {
+		go handleRecords(db, news)
+	}
+
 	for _, feed := range feeds {
-        log.Printf("Run feed %s", feed.Slug)
-		go runFeed(db, &feed, news)
+		go runFeed(db, feed, news)
 	}
 
 	// Wait for an interrupt signal (SIGINT or SIGTERM).
