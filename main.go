@@ -463,14 +463,16 @@ func getFeedRecords(db *sql.DB, feedId string, mdContent bool) ([]Record, error)
 	result := make([]Record, 0)
 	rows, err := db.Query(`
         SELECT
-            id,
-            title,
-            description,
-            content,
-            published_at,
-            link
-        FROM records
-        WHERE feed_id = ?
+            r.id,
+            r.title,
+            r.description,
+            p.content,
+            r.published_at,
+            r.link
+        FROM records r
+        JOIN pages p
+        ON p.url = r.link
+        WHERE r.feed_id = ?
         ;
     `, feedId)
 	if err != nil {
