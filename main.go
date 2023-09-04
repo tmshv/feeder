@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -18,11 +17,11 @@ import (
 
 	"github.com/gilliek/go-opml/opml"
 	"github.com/gofiber/fiber/v2"
-	"github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/database/sqlite3"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/tmshv/feedflow/internal"
+	"github.com/tmshv/feedflow/store"
 
 	"github.com/cixtor/readability"
 	"github.com/gosimple/slug"
@@ -31,58 +30,6 @@ import (
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
 )
-
-type Feed struct {
-	ID        string    `json:"id" db:"id"`
-	Slug      string    `json:"slug" db:"slug"`
-	Url       string    `json:"url" db:"url"`
-	CreatedAt time.Time `json:"createdAt" db:"created_at"`
-	UpdatedAt time.Time `json:"updatedAt" db:"updated_at"`
-	RefreshMs int64     `json:"refreshMs" db:"refresh_ms"`
-}
-
-type Record struct {
-	ID          string    `json:"id" db:"id"`
-	FeedID      string    `json:"feed_id" db:"feed_id"`
-	Title       string    `json:"title" db:"title"`
-	Description string    `json:"description" db:"description"`
-	Content     string    `json:"content" db:"content"`
-	PublishedAt time.Time `json:"published_at" db:"published_at"`
-	Link        string    `json:"link" db:"link"`
-}
-
-type Page struct {
-	Url       string    `json:"url" db:"url"`
-	Html      string    `json:"html" db:"html"`
-	Content   string    `json:"content" db:"content"`
-	CreatedAt time.Time `json:"created_at" db:"created_at"`
-}
-
-func setupDb(migrationsPath string, db *sql.DB) error {
-	driver, err := sqlite3.WithInstance(db, &sqlite3.Config{
-		MigrationsTable: "migrations",
-	})
-	if err != nil {
-		return err
-	}
-
-	sourceUrl := fmt.Sprintf("file://%s", migrationsPath)
-	m, err := migrate.NewWithDatabaseInstance(sourceUrl, "sqlite3", driver)
-	if err != nil {
-		return err
-	}
-	err = m.Up()
-	if err != nil {
-		if err == migrate.ErrNoChange {
-			log.Print("Nothing to migrate")
-			return nil
-		}
-		return err
-	}
-
-	log.Print("Successfully migrated to the latest version")
-	return nil
-}
 
 func DropUtmMarkers(urlStr string) string {
 	u, err := url.Parse(urlStr)
@@ -102,7 +49,7 @@ func DropUtmMarkers(urlStr string) string {
 	return u.String()
 }
 
-func fetchFeedRecords(feed *Feed) ([]Record, error) {
+func fetchFeedRecords(feed *internal.Feed) ([]internal.Record, error) {
 	parser := gofeed.NewParser()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -114,9 +61,9 @@ func fetchFeedRecords(feed *Feed) ([]Record, error) {
 
 	log.Printf("Fetch %s", feed.Url)
 
-	result := make([]Record, 0)
+	result := make([]internal.Record, 0)
 	for _, item := range f.Items {
-		var rec Record
+		var rec internal.Record
 		rec.ID = uuid.NewString()
 		rec.FeedID = feed.ID
 		rec.Title = item.Title
@@ -130,7 +77,7 @@ func fetchFeedRecords(feed *Feed) ([]Record, error) {
 	return result, nil
 }
 
-func runFeed(db *sql.DB, feed Feed, news chan string) {
+func runFeed(db store.Store, feed internal.Feed, news chan string) {
 	log.Printf("Run feed %s (%s)", feed.Slug, feed.Slug)
 	for {
 		records, err := fetchFeedRecords(&feed)
@@ -140,7 +87,7 @@ func runFeed(db *sql.DB, feed Feed, news chan string) {
 
 		count := 0
 		for _, rec := range records {
-			added, err := addRecord(db, rec)
+			added, err := db.AddRecord(rec)
 			if err != nil {
 				log.Printf("Failed add record %s", rec.Link)
 				continue
@@ -156,7 +103,7 @@ func runFeed(db *sql.DB, feed Feed, news chan string) {
 	}
 }
 
-func handleRecords(db *sql.DB, news chan string) error {
+func handleRecords(db store.Store, news chan string) error {
 	log.Println("Wait for news to readability")
 
 	for {
@@ -174,7 +121,7 @@ func handleRecords(db *sql.DB, news chan string) error {
 	}
 }
 
-func handlePage(db *sql.DB, url string) error {
+func handlePage(db store.Store, url string) error {
 	r := readability.New()
 	res, err := http.Get(url)
 	if err != nil {
@@ -210,7 +157,7 @@ func handlePage(db *sql.DB, url string) error {
 		log.Printf("Cannot create markdown of %s, %v", url, err)
 	}
 
-	err = addPage(db, url, htmlStr, md)
+	err = db.AddPage(url, htmlStr, md)
 	if err != nil {
 		log.Printf("Failed to add Page %s", url)
 		return err
@@ -219,8 +166,8 @@ func handlePage(db *sql.DB, url string) error {
 	return nil
 }
 
-func handleOldRecords(db *sql.DB, news chan string) error {
-	urls, err := findRecordsWithNoPage(db)
+func handleOldRecords(db store.Store, news chan string) error {
+	urls, err := db.FindRecordsWithNoPage()
 	if err != nil {
 		log.Printf("Failed to find urls: %v", err)
 		return err
@@ -230,274 +177,6 @@ func handleOldRecords(db *sql.DB, news chan string) error {
 		news <- url
 	}
 	return nil
-}
-
-func addFeed(db *sql.DB, slug string, url string) error {
-	stmt, err := db.Prepare(`
-        INSERT INTO
-        feeds(id, slug, url, created_at, updated_at)
-        VALUES
-        (?, ?, ?, ?, ?)
-    `)
-	if err != nil {
-		return err
-	}
-
-	id := uuid.NewString()
-	now := time.Now()
-	_, err = stmt.Exec(id, slug, url, now, now)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func addPage(db *sql.DB, url string, html string, content string) error {
-	stmt, err := db.Prepare(`
-        INSERT INTO
-        pages(url, created_at, html, content)
-        VALUES
-        (?, ?, ?, ?)
-    `)
-	if err != nil {
-		return err
-	}
-
-	now := time.Now()
-	_, err = stmt.Exec(url, now, html, content)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func updatePageContent(db *sql.DB, page *Page, content string) error {
-	stmt, err := db.Prepare(`
-        UPDATE pages
-        SET content = ?
-        WHERE url = ? AND created_at = ?
-    `)
-	if err != nil {
-		return err
-	}
-	res, err := stmt.Exec(content, page.Url, page.CreatedAt)
-	if err != nil {
-		return err
-	}
-
-	x, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if x == 0 {
-		log.Printf("Content of Page %s is not updated", page.Url)
-	}
-
-	return nil
-}
-
-func getFeedBySlug(db *sql.DB, slug string) (Feed, error) {
-	var feed Feed
-	row := db.QueryRow(`
-        SELECT id, slug, url, created_at, updated_at, refresh_ms
-        FROM feeds
-        WHERE slug = ?
-        LIMIT 1
-        ;
-    `, slug)
-	err := row.Scan(
-		&feed.ID,
-		&feed.Slug,
-		&feed.Url,
-		&feed.CreatedAt,
-		&feed.UpdatedAt,
-		&feed.RefreshMs,
-	)
-	if err != nil {
-		return Feed{}, err
-	}
-	return feed, nil
-}
-
-func findFeedByUrl(db *sql.DB, feedUrl string) (Feed, error) {
-	var feed Feed
-	row := db.QueryRow(`
-        SELECT id, slug, url, created_at, updated_at, refresh_ms
-        FROM feeds
-        WHERE url = ?
-        LIMIT 1
-        ;
-    `, feedUrl)
-	err := row.Scan(
-		&feed.ID,
-		&feed.Slug,
-		&feed.Url,
-		&feed.CreatedAt,
-		&feed.UpdatedAt,
-		&feed.RefreshMs,
-	)
-	if err != nil {
-		return Feed{}, err
-	}
-	return feed, nil
-}
-
-func getFeeds(db *sql.DB) ([]Feed, error) {
-	result := make([]Feed, 0)
-
-	rows, err := db.Query(`
-        SELECT
-        id, slug, url, created_at, updated_at, refresh_ms
-        FROM feeds
-        ;
-    `)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		feed := Feed{}
-		err := rows.Scan(
-			&feed.ID,
-			&feed.Slug,
-			&feed.Url,
-			&feed.CreatedAt,
-			&feed.UpdatedAt,
-			&feed.RefreshMs,
-		)
-		if err != nil {
-			log.Println("Failed to get row")
-			continue
-		}
-
-		// TODO do someting with it
-		feed.RefreshMs += int64(rand.Intn(10000))
-
-		result = append(result, feed)
-	}
-
-	return result, nil
-}
-
-func addRecord(db *sql.DB, item Record) (int64, error) {
-	stmt, err := db.Prepare(`
-        INSERT OR IGNORE INTO
-        records(id, feed_id, title, description, content, published_at, link)
-        VALUES
-        (?, ?, ?, ?, ?, ?, ?)
-    `)
-	if err != nil {
-		return 0, err
-	}
-
-	res, err := stmt.Exec(item.ID, item.FeedID, item.Title, item.Description, item.Content, item.PublishedAt, item.Link)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
-}
-
-func findRecordsWithNoPage(db *sql.DB) ([]string, error) {
-	result := make([]string, 0)
-	rows, err := db.Query(`
-        SELECT records.link
-        FROM records
-        LEFT JOIN pages ON records.link = pages.url
-        WHERE pages.url IS NULL;
-    `)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var url string
-		err := rows.Scan(&url)
-		if err != nil {
-			log.Printf("Failed to get row: %v", err)
-			continue
-		}
-		result = append(result, url)
-	}
-
-	return result, nil
-}
-
-func getAllPages(db *sql.DB) ([]Page, error) {
-	result := make([]Page, 0)
-	rows, err := db.Query(`
-        SELECT
-            url,
-            html,
-            content,
-            created_at
-        FROM pages
-        ;
-    `)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var page Page
-		err := rows.Scan(
-			&page.Url,
-			&page.Html,
-			&page.Content,
-			&page.CreatedAt,
-		)
-		if err != nil {
-			log.Printf("Failed to get row: %v", err)
-			continue
-		}
-		result = append(result, page)
-	}
-
-	return result, nil
-}
-
-func getFeedRecords(db *sql.DB, feedId string, mdContent bool) ([]Record, error) {
-    log.Print("[WARN] mdContent is not implemented")
-	result := make([]Record, 0)
-	rows, err := db.Query(`
-        SELECT
-            r.id,
-            r.title,
-            r.description,
-            p.content,
-            r.published_at,
-            r.link
-        FROM records r
-        JOIN pages p
-        ON p.url = r.link
-        WHERE r.feed_id = ?
-        ;
-    `, feedId)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var rec Record
-		err := rows.Scan(
-			&rec.ID,
-			&rec.Title,
-			&rec.Description,
-			&rec.Content,
-			&rec.PublishedAt,
-			&rec.Link,
-		)
-		if err != nil {
-			log.Printf("Failed to get row: %v", err)
-			continue
-		}
-		result = append(result, rec)
-	}
-
-	return result, nil
 }
 
 func createJsonFeed() {
@@ -539,7 +218,7 @@ func slugify(value string) string {
 	return slug.MakeLang(value, "en")
 }
 
-func importOpml(db *sql.DB, filePath string) error {
+func importOpml(db store.Store, filePath string) error {
 	doc, err := opml.NewOPMLFromFile(filePath)
 	if err != nil {
 		log.Fatal(err)
@@ -551,11 +230,11 @@ func importOpml(db *sql.DB, filePath string) error {
 				continue
 			}
 
-			feed, err := findFeedByUrl(db, item.XMLURL)
+			feed, err := db.FindFeedByUrl(item.XMLURL)
 			if err != nil {
 				slug := slugify(item.Title)
 				log.Printf("Add %s", item.XMLURL)
-				err = addFeed(db, slug, item.XMLURL)
+				err = db.AddFeed(slug, item.XMLURL)
 				continue
 			}
 
@@ -571,9 +250,9 @@ func htmlToMd(html string) (string, error) {
 	return converter.ConvertString(html)
 }
 
-func allToMd(db *sql.DB) {
+func allToMd(db store.Store) {
 	r := readability.New()
-	pages, err := getAllPages(db)
+	pages, err := db.GetAllPages()
 	if err != nil {
 		log.Printf("Failed to all to md: %v", err)
 	}
@@ -592,7 +271,7 @@ func allToMd(db *sql.DB) {
 			continue
 		}
 
-		err = updatePageContent(db, &page, md)
+		err = db.UpdatePageContent(&page, md)
 		if err != nil {
 			log.Printf("Failed to update content of page %s: %v", page.Url, err)
 			continue
@@ -600,7 +279,7 @@ func allToMd(db *sql.DB) {
 	}
 }
 
-func serve(db *sql.DB) {
+func serve(db store.Store) {
 	app := fiber.New()
 
 	app.Get("/", func(c *fiber.Ctx) error {
@@ -609,14 +288,14 @@ func serve(db *sql.DB) {
 
 	app.Get("/feed/:slug", func(c *fiber.Ctx) error {
 		slug := c.Params("slug")
-		feed, err := getFeedBySlug(db, slug)
+		feed, err := db.GetFeedBySlug(slug)
 		if err != nil {
 			return c.Status(404).JSON(&fiber.Map{
 				"error": "Feed not found",
 			})
 		}
 
-		records, err := getFeedRecords(db, feed.ID, true)
+		records, err := db.GetFeedRecords(feed.ID, true)
 		if err != nil {
 			return c.Status(404).JSON(&fiber.Map{
 				"error": "Records not found",
@@ -674,26 +353,22 @@ func serve(db *sql.DB) {
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
+	logger := log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lshortfile)
+
 	DATABASE_URI := "feed.db"
 
-	// Connect to the SQLite database.
-	db, err := sql.Open("sqlite3", DATABASE_URI)
+    db, err := store.NewSqliteStore(DATABASE_URI, logger)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
-
-	err = setupDb("migrations", db)
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	// err = importOpml(db, "20230426-reeder.opml")
 	// err = addFeed(db, "hacker-news", feedUrl)
 
 	go serve(db)
 
-	feeds, err := getFeeds(db)
+	feeds, err := db.GetFeeds()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -702,7 +377,7 @@ func main() {
 
 	// Create a channel to communicate with the goroutine.
 	done := make(chan bool)
-	news := make(chan string, 10000)
+	news := make(chan string, 1000)
 
 	for i := 0; i < 3; i++ {
 		go handleRecords(db, news)
