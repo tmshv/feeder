@@ -8,7 +8,6 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -22,6 +21,7 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/tmshv/feedflow/internal"
 	"github.com/tmshv/feedflow/store"
+	"github.com/tmshv/feedflow/utils"
 
 	"github.com/cixtor/readability"
 	"github.com/gosimple/slug"
@@ -30,24 +30,6 @@ import (
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
 )
-
-func DropUtmMarkers(urlStr string) string {
-	u, err := url.Parse(urlStr)
-	if err != nil {
-		return urlStr // return original URL in case of error
-	}
-
-	queryParams := u.Query()
-	for key := range queryParams {
-		if strings.HasPrefix(key, "utm_") {
-			delete(queryParams, key)
-		}
-	}
-
-	u.RawQuery = queryParams.Encode()
-
-	return u.String()
-}
 
 func fetchFeedRecords(feed *internal.Feed) ([]internal.Record, error) {
 	parser := gofeed.NewParser()
@@ -70,7 +52,7 @@ func fetchFeedRecords(feed *internal.Feed) ([]internal.Record, error) {
 		rec.Description = item.Description
 		rec.Content = item.Content
 		rec.PublishedAt = *item.PublishedParsed
-		rec.Link = DropUtmMarkers(item.Link)
+		rec.Link = utils.DropUtmMarkers(item.Link)
 
 		result = append(result, rec)
 	}
