@@ -5,6 +5,7 @@ go 1.21
 require (
 	github.com/JohannesKaufmann/html-to-markdown v1.4.0 // indirect
 	github.com/PuerkitoBio/goquery v1.8.1 // indirect
+	github.com/alecthomas/kong v0.8.0 // indirect
 	github.com/andybalholm/brotli v1.0.5 // indirect
 	github.com/andybalholm/cascadia v1.3.1 // indirect
 	github.com/cixtor/readability v1.0.0 // indirect

@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alecthomas/kong"
 	"github.com/gilliek/go-opml/opml"
 	"github.com/gofiber/fiber/v2"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
@@ -30,6 +31,19 @@ import (
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
 )
+
+var cli struct {
+	Add struct {
+		// Force     bool `help:"Force removal."`
+		// Recursive bool `help:"Recursively remove files."`
+		//
+		// Paths []string `arg:"" name:"path" help:"Paths to remove." type:"path"`
+	} `cmd:"" help:"Add new feed"`
+
+	Serve struct {
+		// Paths []string `arg:"" optional:"" name:"path" help:"Paths to list." type:"path"`
+	} `cmd:"" help:"Serve feeder"`
+}
 
 func fetchFeedRecords(feed *internal.Feed) ([]internal.Record, error) {
 	parser := gofeed.NewParser()
@@ -287,8 +301,8 @@ func serve(db store.Store) {
 		items := make([]*jsonfeed.Item, 0)
 		for _, rec := range records {
 			item := jsonfeed.Item{
-				ID:  rec.ID,
-				URL: rec.Link,
+				ID:    rec.ID,
+				URL:   rec.Link,
 				Title: rec.Title,
 				// ContentHTML   string  `json:"content_html,omitempty"`   // content_html and content_text are each optional strings — but one or both must be present. This is the HTML or plain text of the item. Important: the only place HTML is allowed in this format is in content_html. A Twitter-like service might use content_text, while a blog might use content_html. Use whichever makes sense for your resource. (It doesn’t even have to be the same for each item in a feed.)
 				ContentText: rec.Content,
@@ -310,7 +324,7 @@ func serve(db store.Store) {
 		url := fmt.Sprintf("http://127.0.0.1:3000/feed/%s", slug)
 		f := jsonfeed.Feed{
 			Version: "https://jsonfeed.org/version/1.1",
-			Title: feed.Slug,
+			Title:   feed.Slug,
 			// HomePageURL string  `json:"home_page_url,omitempty"` // home_page_url (optional but strongly recommended, string) is the URL of the resource that the feed describes. This resource should be an HTML page
 			FeedURL: url,
 			// Description string  `json:"description,omitempty"`   // description (optional, string)
@@ -332,14 +346,12 @@ func serve(db store.Store) {
 	log.Fatal(err)
 }
 
-func main() {
+func run(logger *log.Logger) {
 	rand.Seed(time.Now().UnixNano())
-
-	logger := log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lshortfile)
 
 	DATABASE_URI := "feed.db"
 
-    db, err := store.NewSqliteStore(DATABASE_URI, logger)
+	db, err := store.NewSqliteStore(DATABASE_URI, logger)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -380,6 +392,20 @@ func main() {
 	fmt.Println("closing channel...")
 	close(news)
 	close(done)
+}
+
+func main() {
+	logger := log.New(os.Stdout, "", log.Ldate|log.Ltime|log.Lshortfile)
+
+	ctx := kong.Parse(&cli)
+	switch ctx.Command() {
+	case "serve":
+		run(logger)
+	case "add":
+        logger.Fatal("add command not yet implemented")
+	default:
+		panic(ctx.Command())
+	}
 }
 
 // func initPragmas(db *dbx.DB) error {
