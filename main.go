@@ -19,9 +19,9 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/tmshv/feedflow/internal"
-	"github.com/tmshv/feedflow/store"
-	"github.com/tmshv/feedflow/utils"
+	"github.com/tmshv/feeder/internal"
+	"github.com/tmshv/feeder/store"
+	"github.com/tmshv/feeder/utils"
 
 	"github.com/cixtor/readability"
 	"github.com/gosimple/slug"

@@ -1,7 +1,7 @@
 package store
 
 import (
-	. "github.com/tmshv/feedflow/internal"
+	. "github.com/tmshv/feeder/internal"
 )
 
 type Store interface {

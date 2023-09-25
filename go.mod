@@ -1,4 +1,4 @@
-module github.com/tmshv/feedflow
+module github.com/tmshv/feeder
 
 go 1.21
 
