@@ -403,6 +403,10 @@ func main() {
 		run(logger)
 	case "add":
         logger.Fatal("add command not yet implemented")
+	case "import":
+        logger.Fatal("import command not yet implemented")
+	case "update":
+        logger.Fatal("update command not yet implemented")
 	default:
 		panic(ctx.Command())
 	}
